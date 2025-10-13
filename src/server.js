@@ -36,7 +36,8 @@ const MQTT_URLS = (process.env.MQTT_URLS || [
 const SUB_TOPICS = (process.env.MQTT_TOPIC || process.env.MQTT_SUB_TOPICS ||
   // moisture + valve states ทั้งสองรูปแบบ
   '/buu/iot/+/moisture/state,' +
-  '/buu/iot/+/house+/state/#'           // จับ .../state/valveN และ .../state/vN (ถ้ามี)
+  '/buu/iot/+/house+/state/#' +          // จับ .../state/valveN และ .../state/vN (ถ้ามี)
+  '/buu/iot/+/weather/state/#'
   // '/buu/iot/+/house+/state/#'        // จับ .../valve/state/vN
 ).split(',').map(s => s.trim()).filter(Boolean);
 
@@ -167,7 +168,7 @@ function parseValveIndex(topic) {
 
 function buildBindingTopic(user, house, vIndex) {
   // binding topic มาตรฐาน: .../houseX/state/vY (ไม่มีคำว่า 'valve' ใน path)
-  return `/buu/iot/${user}/house${house}/state/v${vIndex}`;
+  return `/buu/iot/${user}/house${house}/control/state/v${vIndex}`;
 }
 async function lookupVidForValve(pool, topic) {
   const uh = parseUserAndHouse(topic);
@@ -469,16 +470,16 @@ function parseBeforeIdFromWeatherTopic(topic) {
   return m ? m[1] : null;
 }
 
-async function lookupWidForTopic(db, topic, payloadWid) {
+async function lookupWidForTopic(db, fieldTopic, fieldId) {
   // 1) payload.wid มาก่อน
-  if (payloadWid !== undefined && payloadWid !== null && payloadWid !== '') {
-    const widNum = Number(payloadWid);
-    return Number.isFinite(widNum) ? widNum : payloadWid; // รองรับทั้งเลขและ string
-  }
+  // if (payloadWid !== undefined && payloadWid !== null && payloadWid !== '') {
+  //   const widNum = Number(payloadWid);
+  //   return Number.isFinite(widNum) ? widNum : payloadWid; // รองรับทั้งเลขและ string
+  // }
 
-  // 2) หา {id} จาก topic /weather/state/{id}
-  const fieldId = parseFieldFromWeatherTopic(topic);
-  const fieldTopic = parseBeforeIdFromWeatherTopic(topic);
+  // // 2) หา {id} จาก topic /weather/state/{id}
+  // const fieldId = parseFieldFromWeatherTopic(topic);
+  // const fieldTopic = parseBeforeIdFromWeatherTopic(topic);
 
   if (fieldId) {
     // 3) ลองหาใน binding ด้วย field == {id}
@@ -591,7 +592,7 @@ function connectMqtt(url) {
 
 mqttClient.on('message', async (topic, payloadBuf, packet) => {
   const payloadText = payloadBuf.toString('utf8').trim();
-  console.log('[MQTT] RECV', { topic, retain: !!packet?.retain, len: payloadBuf.length });
+  console.log('[MQTT] RECV', { topic, retain: !!packet?.retain, payload: payloadText, len: payloadBuf.length});
 
   
   // 1) ต้องเป็น JSON เท่านั้น
@@ -600,7 +601,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
   // if (/^\/buu\/iot\/[^/]+\/house\d+\/(?:state\/valve\d+|valve\/state\/v\d+)(?:\/|$)/i.test(topic)) {
   // if (/^\/buu\/iot\/[^/]+\/house\d+\/(?:state\/(?:v\d+|valve\d+)|valve\/state\/v\d+)(?:\/|$)/i.test(topic)) {
 
-  if (/^\/buu\/iot\/[^/]+\/house\d+\/state\/v\d+(?:\/|$)/i.test(topic)) {
+  if (/^\/buu\/iot\/[^/]+\/house\d+\/control\/state\/v\d+(?:\/|$)/i.test(topic)) {
 
     const text = payloadBuf.toString('utf8').trim();
 
@@ -611,6 +612,8 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
     const m = text.match(
       /^(?:(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}|\d{2}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2})\s+)?VALVE(\d+)_(ON|OFF)\b/i
     );
+
+    // console.log("m: ",m);
 
     if (!m) { console.warn('[MQTT] valve-state: payload not recognized:', text); return; }
 
@@ -720,6 +723,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
 
             rows.push({
               sid,
+              name: field,
               moisture: moistureVal,
               temperature: (typeof temp === 'number') ? temp : null,
               measured_at: measuredAt,   // เก็บเป็นสตริง MySQL พร้อมแล้ว
@@ -744,6 +748,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
           broadcastEvent({
             type: 'moisture',
             sid: r.sid,
+            name: r.name,
             moisture: r.moisture,
             temperature: r.temperature ?? null,
             measured_at: new Date(r.measured_at).toISOString(),
@@ -770,8 +775,8 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
 
 
 
-          // หา wid: payload > topic (/weather/state/{id}) > binding(field) > DEFAULT_WID
-          let wid = await lookupWidForTopic(pool, topic, s.wid);
+          // หา wid: payload > topic (/weather/state) > binding(field) > DEFAULT_WID
+          let wid = await lookupWidForTopic(pool, topic, s.name);
           if (!Number.isFinite(Number(wid))) {
             // หากยังไม่ใช่ตัวเลข (กรณี payload ใส่เป็น string ที่ไม่มีใน binding)
             wid = DEFAULT_WID;
@@ -787,17 +792,18 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
 
           // map ชื่อคีย์จาก ESP32 -> คอลัมน์ใน climate
           rows.push({
+            name:    s.name,
             temperature:     toNumOrNull(s.temperature),
             humidity:        toNumOrNull(s.humidity),
             vpd:             toNumOrNull(s.vpd),
             dew_point:       toNumOrNull(s.dew_point),
-            wind_speed:      toNumOrNull(s.windSpeed),
-            wind_gust:       toNumOrNull(s.windGust),
-            wind_direction:  toNumOrNull(s.windDir),
-            wind_max_day:    toNumOrNull(s.windMaxDay),
-            solar_radiation: toNumOrNull(s.solar),
-            uv_index:        toNumOrNull(s.uv),
-            rain_day:        toNumOrNull(s.rainDay),
+            wind_speed:      toNumOrNull(s.wind_speed),
+            wind_gust:       toNumOrNull(s.wind_gust),
+            wind_direction:  toNumOrNull(s.wind_direction),
+            wind_max_day:    toNumOrNull(s.wind_max_day),
+            solar_radiation: toNumOrNull(s.solar_radiation),
+            uv_index:        toNumOrNull(s.uv_index),
+            rain_day:        toNumOrNull(s.rain_day),
             measured_at:     measuredAt,   // Date object (จะถูกแปลงเป็น 'YYYY-MM-DD HH:mm:SS' ใน insert helper)
             wid
           });
@@ -810,9 +816,10 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
 
         // Broadcast แบบเรียลไทม์ (SSE/WS)
         for (const r of rows) {
-          broadcast({
+          broadcastEvent({
             type: 'weather',
             wid: r.wid,
+            name: r.name,
             temperature: r.temperature,
             humidity: r.humidity,
             vpd: r.vpd,
@@ -827,6 +834,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
             measured_at: (r.measured_at instanceof Date ? r.measured_at : new Date(r.measured_at)).toISOString(),
           });
         }
+
         return;
       }
 
@@ -844,7 +852,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
           const measuredAt = toMySQLDateTime(dt);
 
           // หา wid: payload > topic (/weather/state/{id}) > binding(field) > DEFAULT_WID
-          let widAny = await lookupWidForTopic(pool, topic, s.wid);
+          let widAny = await lookupWidForTopic(pool, topic, s.name);
           let wid = Number(widAny);
           if (!Number.isFinite(wid)) wid = DEFAULT_WID;
 
@@ -855,11 +863,11 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
 
           // map key จาก ESP32 -> คอลัมน์ตาราง
           rows.push({
-            temperature:     s.temperature,
-            humidity:        s.humidity,
-            wind_speed:      s.windSpeed,
-            solar_radiation: s.solar,
-            eto:             s.ETo,
+            h_temperature:     s.h_temperature,
+            h_humidity:        s.h_humidity,
+            h_wind_speed:      s.h_wind_speed,
+            h_solar_radiation: s.h_solar_radiation,
+            h_eto:             s.h_ETo,
             measured_at:     measuredAt,
             wid
           });
@@ -872,17 +880,19 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
 
         // (ถ้าต้องการ) broadcast ให้ frontend
         for (const r of rows) {
-          broadcast({
+          broadcastEvent({
             type: 'hourly',
             wid: r.wid,
-            temperature: r.temperature,
-            humidity: r.humidity,
-            wind_speed: r.wind_speed,
-            solar_radiation: r.solar_radiation,
-            eto: r.eto,
+            h_temperature: r.h_temperature,
+            h_humidity: r.h_humidity,
+            h_wind_speed: r.h_wind_speed,
+            h_solar_radiation: r.h_solar_radiation,
+            h_eto: r.h_eto,
             measured_at: new Date(r.measured_at).toISOString(),
           });
         }
+
+
         return;
       }
 
@@ -905,7 +915,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
           const measuredAt = toMySQLDateTime(dt);
 
           // 2) หา wid ตามลำดับ: payload.wid → topic (/weather/state/{id}) → binding(field) → DEFAULT_WID
-          let widAny = await lookupWidForTopic(pool, topic, it.wid);
+          let widAny = await lookupWidForTopic(pool, topic, it.name);
           let wid = Number(widAny);
           if (!Number.isFinite(wid)) wid = DEFAULT_WID;
 
@@ -1013,6 +1023,213 @@ app.get('/api/health', async (req, res) => {
     res.status(500).json({ ok: false, error: 'DB error' });
   }
 });
+
+
+// ================= Historical Moisture =================
+// GET /api/history/moisture/aggregate
+// query:
+//   start, end          : ISO (UTC) เช่น '2025-10-10T00:00:00Z'
+//   granularity         : '15m' | 'hour' | 'day'   (default = 'hour')
+//   stat                : 'avg' | 'min' | 'max'    (default = 'avg')
+//   pid (จำเป็น), zid (อาจว่าง = ทุกโซนใน plot)
+//   sids (CSV optional) : เช่น "1,2,3" ถ้าไม่ส่ง -> ใช้ทุก sid ตาม scope pid/zid
+app.get('/api/history/moisture/aggregate', async (req, res) => {
+  try {
+    const { start, end, granularity='hour', stat='avg', pid, zid, sids } = req.query;
+
+    if (!start || !end || !pid) {
+      return res.status(400).json({ error: 'missing start/end/pid' });
+    }
+
+    const g = String(granularity).toLowerCase();
+    const statFn = ({avg:'AVG', min:'MIN', max:'MAX'}[String(stat).toLowerCase()] || 'AVG');
+
+    // ความกว้าง bucket (วินาที)
+    const bucketSec =
+      g === '15m' ? 15*60 :
+      g === 'day' ? 24*60*60 :
+      60*60; // 'hour' (default)
+
+    // ทำลิสต์ sid filter
+    const sidList = (String(sids||'').trim())
+      ? String(sids).split(',').map(s => s.trim()).filter(Boolean).map(n => Number(n)).filter(Number.isFinite)
+      : [];
+
+    // สร้างเงื่อนไข scope: plot / zone / (sid ถ้าเลือก)
+    // หมายเหตุ: measured_at เก็บเป็น UTC แล้ว (server ทำ timezone='Z' ใน pool)
+    // Bucket ด้วย UNIX_TIMESTAMP()
+    let sql = `
+      SELECT
+        FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(m.measured_at)/?)*?)           AS bucket_at,
+        m.sid                                                              AS sid,
+        ${statFn}(m.moisture)                                              AS moisture
+      FROM moisture m
+      JOIN soilSensor s ON s.sid = m.sid
+      JOIN zone z       ON z.zid = s.zid
+      JOIN plot p       ON p.pid = z.pid
+      WHERE m.measured_at BETWEEN ? AND ?
+        AND p.pid = ?
+    `;
+    const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+
+    if (zid) {
+      sql += ` AND z.zid = ? `;
+      params.push(Number(zid));
+    }
+    if (sidList.length) {
+      sql += ` AND m.sid IN (${sidList.map(() => '?').join(',')}) `;
+      params.push(...sidList);
+    }
+
+    sql += `
+      GROUP BY bucket_at, m.sid
+      ORDER BY bucket_at ASC, m.sid ASC
+    `;
+
+    const [rows] = await pool.query(sql, params);
+    // โครงคืนค่า: [{bucket_at: '2025-10-10 01:00:00', sid: 3, moisture: 41.2}, ...]
+    res.json({ rows, bucketSec, stat: statFn });
+  } catch (e) {
+    console.error('[history.moisture]', e);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+
+
+// ================= Historical Weather =================
+// GET /api/history/weather/aggregate
+// query:
+//   start, end        : ISO UTC เช่น '2025-10-10T00:00:00Z' (จำเป็น)
+//   granularity       : '15m' | 'hour' | 'day'   (default 'hour')
+//   stat              : 'avg' | 'min' | 'max'    (default 'avg')
+//   pid               : plot id (จำเป็น), zid (อาจว่าง)
+//   wids              : CSV ของ wid (อาจว่าง → ใช้ทุกสถานีใน scope pid/zid)
+//   metric            : 'temperature' | 'humidity' | 'vpd'
+//                       | 'temp_hum' | 'both'
+//                       | 'temp_hum_vpd' | 'all'
+app.get('/api/history/weather/aggregate', async (req, res) => {
+  try {
+    const {
+      start, end,
+      granularity = 'hour',
+      stat = 'avg',
+      pid, zid,
+      wids,
+      metric = 'temperature'
+    } = req.query;
+
+    if (!start || !end || !pid) {
+      return res.status(400).json({ error: 'missing start/end/pid' });
+    }
+
+    const g = String(granularity).toLowerCase();
+    const statFn = ({ avg: 'AVG', min: 'MIN', max: 'MAX' }[String(stat).toLowerCase()] || 'AVG');
+
+    const metricRaw = String(metric).toLowerCase();
+    const bothMode  = (metricRaw === 'temp_hum' || metricRaw === 'both');
+    const allMode   = (metricRaw === 'temp_hum_vpd' || metricRaw === 'all'); // << ใหม่
+
+    // ความกว้าง bucket (วินาที)
+    const bucketSec =
+      g === '15m' ? 15 * 60 :
+      g === 'day' ? 24 * 60 * 60 :
+      60 * 60; // 'hour' (default)
+
+    const widList = (String(wids || '').trim())
+      ? String(wids).split(',').map(s => s.trim()).filter(Boolean).map(Number).filter(Number.isFinite)
+      : [];
+
+    // ---------- โหมดรวม 3 ค่า: temperature + humidity + vpd ----------
+    if (allMode) {
+      let sql = `
+        SELECT
+          FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(c.measured_at)/?)*?) AS bucket_at,
+          c.wid                                                   AS wid,
+          ${statFn}(c.temperature)                                 AS temperature,
+          ${statFn}(c.humidity)                                    AS humidity,
+          ${statFn}(c.vpd)                                         AS vpd
+        FROM climate c
+        JOIN weatherStation w ON w.wid = c.wid
+        JOIN zone z           ON z.zid = w.zid
+        JOIN plot p           ON p.pid = z.pid
+        WHERE c.measured_at BETWEEN ? AND ?
+          AND p.pid = ?
+      `;
+      const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+      if (zid) { sql += ` AND z.zid = ? `; params.push(Number(zid)); }
+      if (widList.length) {
+        sql += ` AND c.wid IN (${widList.map(() => '?').join(',')}) `;
+        params.push(...widList);
+      }
+      sql += ` GROUP BY bucket_at, c.wid ORDER BY bucket_at ASC, c.wid ASC `;
+
+      const [rows] = await pool.query(sql, params);
+      return res.json({ rows, bucketSec, stat: statFn, metric: 'temp_hum_vpd' });
+    }
+
+    // ---------- โหมดรวม 2 ค่า: temperature + humidity ----------
+    if (bothMode) {
+      let sql = `
+        SELECT
+          FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(c.measured_at)/?)*?) AS bucket_at,
+          c.wid                                                   AS wid,
+          ${statFn}(c.temperature)                                 AS temperature,
+          ${statFn}(c.humidity)                                    AS humidity
+        FROM climate c
+        JOIN weatherStation w ON w.wid = c.wid
+        JOIN zone z           ON z.zid = w.zid
+        JOIN plot p           ON p.pid = z.pid
+        WHERE c.measured_at BETWEEN ? AND ?
+          AND p.pid = ?
+      `;
+      const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+      if (zid) { sql += ` AND z.zid = ? `; params.push(Number(zid)); }
+      if (widList.length) {
+        sql += ` AND c.wid IN (${widList.map(() => '?').join(',')}) `;
+        params.push(...widList);
+      }
+      sql += ` GROUP BY bucket_at, c.wid ORDER BY bucket_at ASC, c.wid ASC `;
+
+      const [rows] = await pool.query(sql, params);
+      return res.json({ rows, bucketSec, stat: statFn, metric: 'temp_hum' });
+    }
+
+    // ---------- โหมดเดี่ยว: temperature / humidity / vpd ----------
+    const colMap = { temperature: 'temperature', humidity: 'humidity', vpd: 'vpd' };
+    const col = colMap[metricRaw] || 'temperature';
+
+    let sql = `
+      SELECT
+        FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(c.measured_at)/?)*?) AS bucket_at,
+        c.wid                                                   AS wid,
+        ${statFn}(c.${col})                                      AS value
+      FROM climate c
+      JOIN weatherStation w ON w.wid = c.wid
+      JOIN zone z           ON z.zid = w.zid
+      JOIN plot p           ON p.pid = z.pid
+      WHERE c.measured_at BETWEEN ? AND ?
+        AND p.pid = ?
+    `;
+    const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+    if (zid) { sql += ` AND z.zid = ? `; params.push(Number(zid)); }
+    if (widList.length) {
+      sql += ` AND c.wid IN (${widList.map(() => '?').join(',')}) `;
+      params.push(...widList);
+    }
+    sql += ` GROUP BY bucket_at, c.wid ORDER BY bucket_at ASC, c.wid ASC `;
+
+    const [rows] = await pool.query(sql, params);
+    res.json({ rows, bucketSec, stat: statFn, metric: col });
+  } catch (e) {
+    console.error('[history.weather]', e);
+    res.status(500).json({ error: 'internal error' });
+  }
+});
+
+
+
+
 
 // ---- Soil sensors listing (join with zone for context) ----
 app.get('/api/soil-sensors', async (req, res) => {
