@@ -36,7 +36,7 @@ const MQTT_URLS = (process.env.MQTT_URLS || [
 const SUB_TOPICS = (process.env.MQTT_TOPIC || process.env.MQTT_SUB_TOPICS ||
   // moisture + valve states ทั้งสองรูปแบบ
   '/buu/iot/+/moisture/state,' +
-  '/buu/iot/+/house+/state/#' +          // จับ .../state/valveN และ .../state/vN (ถ้ามี)
+  '/buu/iot/+/+/control/state/#' +          // จับ .../state/valveN และ .../state/vN (ถ้ามี)
   '/buu/iot/+/weather/state/#'
   // '/buu/iot/+/house+/state/#'        // จับ .../valve/state/vN
 ).split(',').map(s => s.trim()).filter(Boolean);
@@ -698,7 +698,7 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
           const genericTemp =
             (typeof s.temperature === 'number') ? s.temperature :
             (typeof s.temp === 'number')        ? s.temp        : null;
-
+ 
           // 3) ไล่ key smN → แม็ป sid ด้วย (topic, field)
           for (const [k, v] of Object.entries(s)) {
             const m = /^sm(\d+)$/.exec(k);
@@ -721,11 +721,32 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
             if (typeof s[`st${idx}`] === 'number')      temp = s[`st${idx}`];
             else if (typeof s[`t${idx}`]  === 'number') temp = s[`t${idx}`];
 
+            // ph เฉพาะช่อง (phN/tN) > temp รวม
+            let ph = null;
+            if (typeof s[`ph${idx}`] === 'number')      ph = s[`ph${idx}`];
+ 
+            let ec = null;
+            if (typeof s[`ec${idx}`] === 'number')      ec = s[`ec${idx}`];
+           let n = null;
+            if (typeof s[`n${idx}`] === 'number')      n = s[`n${idx}`];
+
+            let p = null;
+            if (typeof s[`p${idx}`] === 'number')      p = s[`p${idx}`];
+
+           let potassium = 0;
+            if (typeof s[`k${idx}`] === 'number')      potassium = s[`k${idx}`];
+
+            
             rows.push({
               sid,
               name: field,
               moisture: moistureVal,
               temperature: (typeof temp === 'number') ? temp : null,
+              ph: (typeof ph === 'number')?ph:null,
+              ec: (typeof ec === 'number')?ec:null,
+              n: (typeof n === 'number')?n:null,
+              p: (typeof p === 'number')?p:null,
+              k: (typeof potassium === 'number')?potassium:null,
               measured_at: measuredAt,   // เก็บเป็นสตริง MySQL พร้อมแล้ว
             });
           }
@@ -736,9 +757,9 @@ mqttClient.on('message', async (topic, payloadBuf, packet) => {
         // 4) insert ทีละแถว
         for (const r of rows) {
           await pool.query(
-            `INSERT INTO moisture (moisture, temperature, measured_at, sid)
-            VALUES (?, ?, ?, ?)`,
-            [r.moisture, r.temperature, r.measured_at, r.sid]
+            `INSERT INTO moisture (moisture, temperature, ph, ec_us_cm, n, p, k, measured_at, sid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [r.moisture, r.temperature, r.ph, r.ec, r.n, r.p, r.k, r.measured_at, r.sid]
           );
         }
         console.log(`[MQTT] moisture inserted: ${rows.length} row(s)`);
