@@ -73,6 +73,15 @@ pool.query('SELECT 1').then(() => {
   console.error('[DB] connect error:', e && e.message ? e.message : e);
 });
 
+// ฟังก์ชันช่วยแปลงเวลา UTC → เวลาประเทศไทย
+function toThailandTime(isoString) {
+  const utcDate = new Date(isoString);
+  // เพิ่ม 7 ชั่วโมง (7 * 60 * 60 * 1000 ms)
+  return new Date(utcDate.getTime() + 7 * 60 * 60 * 1000);
+  // return new Date(utcDate.getTime() + 0 * 60 * 60 * 1000);
+}
+
+
 // ====== State / SSE ======
 let mqttClient = null;
 let currentUrlIdx = 0;
@@ -1177,13 +1186,33 @@ app.get('/api/history/weather/aggregate', async (req, res) => {
         WHERE c.measured_at BETWEEN ? AND ?
           AND p.pid = ?
       `;
-      const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+      // const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+      const params = [
+        bucketSec, bucketSec,
+        toThailandTime(start),
+        toThailandTime(end),
+        Number(pid)
+      ];
+
       if (zid) { sql += ` AND z.zid = ? `; params.push(Number(zid)); }
       if (widList.length) {
         sql += ` AND c.wid IN (${widList.map(() => '?').join(',')}) `;
         params.push(...widList);
       }
       sql += ` GROUP BY bucket_at, c.wid ORDER BY bucket_at ASC, c.wid ASC `;
+
+console.log("Start:",start," End:",end);
+const paramsForLog = [...params];  // shallow copy
+const finalSQL = sql.replace(/\?/g, () => {
+  const val = paramsForLog.shift();
+  return typeof val === 'string'
+    ? `'${val}'`
+    : (val instanceof Date
+        ? `'${val.toISOString().slice(0, 19).replace('T', ' ')}'`
+        : val);
+});
+console.log("[SQL]", finalSQL);
+
 
       const [rows] = await pool.query(sql, params);
       return res.json({ rows, bucketSec, stat: statFn, metric: 'temp_hum_vpd' });
@@ -1204,7 +1233,13 @@ app.get('/api/history/weather/aggregate', async (req, res) => {
         WHERE c.measured_at BETWEEN ? AND ?
           AND p.pid = ?
       `;
-      const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+      // const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+      const params = [
+        bucketSec, bucketSec,
+        toThailandTime(start),
+        toThailandTime(end),
+        Number(pid)
+      ];      
       if (zid) { sql += ` AND z.zid = ? `; params.push(Number(zid)); }
       if (widList.length) {
         sql += ` AND c.wid IN (${widList.map(() => '?').join(',')}) `;
@@ -1232,7 +1267,13 @@ app.get('/api/history/weather/aggregate', async (req, res) => {
       WHERE c.measured_at BETWEEN ? AND ?
         AND p.pid = ?
     `;
-    const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+    // const params = [bucketSec, bucketSec, new Date(start), new Date(end), Number(pid)];
+    const params = [
+      bucketSec, bucketSec,
+      toThailandTime(start),
+      toThailandTime(end),
+      Number(pid)
+    ];    
     if (zid) { sql += ` AND z.zid = ? `; params.push(Number(zid)); }
     if (widList.length) {
       sql += ` AND c.wid IN (${widList.map(() => '?').join(',')}) `;
